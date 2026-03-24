@@ -5,6 +5,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableParallel, RunnableLambda, RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 
 # Load OpenAI API key from .env (avoid committing secrets)
 load_dotenv()
@@ -14,9 +16,9 @@ if not openai_key:
 os.environ["OPENAI_API_KEY"] = openai_key
 
 # Fetch the transcript of a YouTube video
-vedio_id = "X0btK9X0Xnk"  # Replace with your YouTube video ID  
+vedio_id = "4C_zbU3abfA"  # Replace with your YouTube video ID  
 try:
-    transcript = YouTubeTranscriptApi().fetch(vedio_id, languages=['hi'] )
+    transcript = YouTubeTranscriptApi().fetch(vedio_id, languages=['en'] )
     transcript_text = " ".join([entry.text for entry in transcript])
     #print(transcript_text)  # Print the transcript text
 except TranscriptsDisabled:
@@ -27,12 +29,27 @@ except Exception as e:
 # Split the transcript into chunks
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)  
 chunks = text_splitter.split_text(transcript_text)
-#print(f"Number of chunks: {len(chunks)}")  # Print the number of chunks
 
 # Create embeddings and store in FAISS
 embeddings = OpenAIEmbeddings()
 vector_store = FAISS.from_texts(chunks, embeddings)
-#print(vector_store.index_to_docstore_id)
+
+# Retrieve relevant chunks from the vector store
+retrieve = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+
+user_question = input("Ask a question about the video: ")
+
+relevant_chunks = retrieve.invoke(user_question)  # Example question to retrieve relevant chunks
+
+# Combine the relevant chunks into a single context
+def format_retrieval_output(relevant_chunks):
+    return " ".join([chunk.page_content for chunk in relevant_chunks])
+
+print(f"Relevant Chunks: {format_retrieval_output(relevant_chunks)}")  # Print the relevant chunks
+parallel_Chain = RunnableParallel({
+    'context': retrieve |RunnableLambda(format_retrieval_output),  # Format the retrieved chunks into a context string
+    'question': RunnablePassthrough()  # Pass the question through without modification
+})
 
 # Create a prompt template for the chatbot
 prompt_template = PromptTemplate(
@@ -42,25 +59,15 @@ prompt_template = PromptTemplate(
     "an answer in the context: {context}, question: {question}"
 )
 
-# Create a chatbot function contain retrieval and response generation using the OpenAI language model   
-def chatbot(question):
-    # Retrieve relevant chunks from the vector store
-    relevant_chunks = vector_store.similarity_search(question, k=3)
-    
-    # Combine the relevant chunks into a single context
-    context = " ".join([chunk.page_content for chunk in relevant_chunks])
-    
-    # Create a prompt with the question and context
-    prompt = prompt_template.format(question=question, context=context)
-    
-    # Generate a response using the OpenAI language model
-    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.7 )
-    response = llm.invoke([{"role": "user", "content": prompt}])
-    
-    return response.content
+string_output_parser = StrOutputParser()
 
-# Example usage
-user_question = input("Ask a question about the video: ")
-answer = chatbot(user_question)
+# Generate a response using the OpenAI language model
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.7 )
+
+main_chain = parallel_Chain | prompt_template | llm | string_output_parser
+
+response = main_chain.invoke(user_question)
+
+#Usage
 print(f"Question: {user_question}") 
-print(f"Answer: {answer}")  
+print(f"Answer: {response}")  
